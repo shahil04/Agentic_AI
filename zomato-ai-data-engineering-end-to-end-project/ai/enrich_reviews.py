@@ -1,16 +1,17 @@
 import os
-import json
+from pathlib import Path
 import snowflake.connector
-from openai import OpenAI
 from dotenv import load_dotenv
+from providers import load_settings
+from workflows import invoke_json_prompt
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
 
-MODEL = "gpt-4o-mini"
+SETTINGS = load_settings()
+MODEL = SETTINGS.model_identifier
 
 SAMPLE_N = 5
 TOPICS = ["food quality", "delivery", "pricing", "service", "packaging", "other"]
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 SYSTEM_PROMPT = f"""
 You classify customer reviews for a food delivery app.
@@ -63,17 +64,19 @@ def get_reviews_to_enrich(cursor):
     return cursor.fetchall()
 
 def classify_review(comment):
-    response = client.chat.completions.create(
-        model=MODEL,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": comment}
-        ]
-    )
-    answer = response.choices[0].message.content
-    return json.loads(answer)
+    labels = invoke_json_prompt(SYSTEM_PROMPT, comment, temperature=0)
+    if (
+        labels.get("sentiment_label") not in {"positive", "negative", "neutral"}
+        or not isinstance(labels.get("sentiment_score"), (int, float))
+        or not -1.0 <= labels["sentiment_score"] <= 1.0
+        or labels.get("topic") not in TOPICS
+        or (
+            labels.get("key_issue") is not None
+            and not isinstance(labels.get("key_issue"), str)
+        )
+    ):
+        raise ValueError("The model returned invalid review classification fields.")
+    return labels
 
 def save_results(cursor, results):
     """Insert all the enriched rows into Snowflake in one go."""

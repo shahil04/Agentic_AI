@@ -1,15 +1,17 @@
 import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
 import snowflake.connector
-from openai import OpenAI
-import json
 from dotenv import load_dotenv
+from providers import load_settings
+from workflows import invoke_json_prompt
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
 
-MODEL = "gpt-4o-mini"
+SETTINGS = load_settings()
+MODEL = SETTINGS.model_identifier
 
 FORBIDDEN_WORDS = ['drop', 'delete', 'truncate', 'alter', 'update', 'insert', 'create', 'replace', 'grant', 'revoke']
 
@@ -19,8 +21,6 @@ EXAMPLE_QUESTIONS = [
     "Average delivery time by city, worst first",
     "Cancel rate by payment method"
 ]
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 SCHEMA = """
 Tables available (Snowflake). Use bare table names, no database or schema prefix.
@@ -67,17 +67,10 @@ def get_connection():
 
 
 def generate_sql(question):
-    response = client.chat.completions.create(
-        model=MODEL,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": question}
-        ]
-    )
-    answer = response.choices[0].message.content
-    sql = json.loads(answer)["sql"]
+    result = invoke_json_prompt(SYSTEM_PROMPT, question, temperature=0)
+    sql = result["sql"]
+    if not isinstance(sql, str):
+        raise ValueError("The model did not return SQL as a string.")
 
     sql = sql.replace("ZOMATO.MARTS.", "").replace("ZOMATO.", "")
     return sql.strip().rstrip(";")

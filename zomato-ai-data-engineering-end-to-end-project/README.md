@@ -26,15 +26,15 @@ The dataset lands in an S3 data lake and flows into Snowflake through a storage 
 
 ## Tech stack
 
-Python · Pandas · Amazon S3 · Snowflake · dbt (dbt-snowflake) · Apache Airflow 3 (Docker) · OpenAI (`gpt-4o-mini`, `text-embedding-3-small`) · Streamlit
+Python · Pandas · Amazon S3 · Snowflake · dbt (dbt-snowflake) · Apache Airflow 3 (Docker) · LangChain · LangGraph · Gemini / Groq / OpenAI / Anthropic · Streamlit
 
 ## Repository structure
 
 ```
 ├── airflow/                  # Airflow 3 on Docker
-│   ├── Dockerfile            #   Snowflake + OpenAI providers, dbt in its own venv
+│   ├── Dockerfile            #   Snowflake + LangChain providers, dbt in its own venv
 │   ├── docker-compose.yaml   #   postgres + api-server + scheduler; creds via env vars
-│   ├── example.env           #   template for SNOWFLAKE_* / OPENAI_API_KEY
+│   ├── example.env           #   template for Snowflake + selectable LLM provider settings
 │   └── dags/zomato_batch.py  #   the pipeline DAG (4 tasks)
 ├── zomato/                   # dbt project
 │   ├── models/staging/       #   7 staging views (Silver) + sources + tests
@@ -44,6 +44,9 @@ Python · Pandas · Amazon S3 · Snowflake · dbt (dbt-snowflake) · Apache Airf
 │   ├── enrich_reviews.py     #   LLM enrichment → ZOMATO.AI.REVIEW_ENRICHED
 │   ├── rag_chat.py           #   RAG — "chat with your reviews" (Streamlit)
 │   ├── text_to_sql.py        #   text-to-SQL — "chat with your warehouse" (Streamlit)
+│   ├── providers.py          #   shared provider/model configuration and client factories
+│   ├── workflows.py          #   shared LangGraph model workflows
+│   ├── requirements.txt      #   AI application dependencies
 │   └── example.env           #   template for the AI credentials
 ├── snowflake/                # Snowflake setup SQL (run in Snowsight, in order)
 │   ├── 01_setup.sql          #   warehouse ZOMATO_WH, database ZOMATO, schemas, role
@@ -93,16 +96,18 @@ One daily DAG, [`zomato_batch`](airflow/dags/zomato_batch.py), runs the whole th
 
 ```
 reload_raw  →  dbt_build_core  →  enrich_reviews  →  dbt_build_ai
-(COPY from S3)  (dbt build + tests)  (OpenAI enrichment)   (AI mart)
+(COPY from S3)  (dbt build + tests)  (configured LLM enrichment)   (AI mart)
 ```
 
 Credentials never touch the code: docker-compose injects `SNOWFLAKE_*` env vars (read by dbt's `profiles.yml` via `env_var()`) and an `AIRFLOW_CONN_SNOWFLAKE_DEFAULT` connection for the COPY task.
 
 ### 6 · AI layer — three capabilities
 
-1. **LLM enrichment** (`ai/enrich_reviews.py`) — *LLM as a transformation step.* Reads review text, asks `gpt-4o-mini` for structured JSON (sentiment + topic), writes it back to `ZOMATO.AI.REVIEW_ENRICHED` — which dbt then models into `mart_review_insights` like any other table. Idempotent and sample-capped (`SAMPLE_N`) so you never pay twice for the same review.
-2. **RAG** (`ai/rag_chat.py`) — *chat with your reviews.* Embeds reviews, retrieves the most similar ones for a question, and generates an answer grounded in real reviews (with sources).
-3. **Text-to-SQL** (`ai/text_to_sql.py`) — *chat with your warehouse.* The LLM gets the marts' schema, writes Snowflake SQL for an English question, and a SELECT-only guard validates it before running as `DBT_ROLE`.
+1. **LLM enrichment** (`ai/enrich_reviews.py`) — *LLM as a transformation step.* Reads review text, asks the configured response model for structured JSON (sentiment + topic), writes it back to `ZOMATO.AI.REVIEW_ENRICHED` — which dbt then models into `mart_review_insights` like any other table. Idempotent and sample-capped (`SAMPLE_N`) so you never pay twice for the same review.
+2. **RAG** (`ai/rag_chat.py`) — *chat with your reviews.* Embeds reviews using the configured embedding model, retrieves the most similar ones for a question, and generates an answer grounded in real reviews (with sources).
+3. **Text-to-SQL** (`ai/text_to_sql.py`) — *chat with your warehouse.* The configured response model gets the marts' schema, writes Snowflake SQL for an English question, and the existing SELECT-only guard validates it before running as `DBT_ROLE`.
+
+The three response tasks share `LLM_PROVIDER` (`gemini`, `groq`, `openai`, or `anthropic`). RAG embeddings use the separate `EMBEDDING_PROVIDER` setting (`gemini` or `openai`), since Groq and Anthropic are not used as embedding providers here. Provider credentials are read from environment variables; there is no automatic fallback. Gemini and Groq may offer limited free quotas depending on account and current provider terms; OpenAI and Anthropic API access may require billing.
 
 ## Running it
 
@@ -115,16 +120,24 @@ cd zomato
 export SNOWFLAKE_ACCOUNT=... SNOWFLAKE_USER=... SNOWFLAKE_PASSWORD=...
 dbt debug && dbt build --exclude tag:ai
 
+# AI provider setup (the same settings work for local scripts and Airflow)
+# Copy ai/example.env to ai/.env, then set the provider API key(s) you use.
+pip install -r ai/requirements.txt
+# Set LLM_PROVIDER=gemini|groq|openai|anthropic.
+# Set EMBEDDING_PROVIDER=gemini|openai for RAG; these are independent settings.
+
 # Airflow
 cd airflow
-cp example.env .env          # fill SNOWFLAKE_* , OPENAI_API_KEY, SAMPLE_N
+cp example.env .env          # fill Snowflake settings and selected provider key/model
 docker compose build && docker compose up -d
 # http://localhost:8080 → un-pause zomato_batch → Trigger
 
 # AI apps
-export OPENAI_API_KEY=sk-...
+cd ..
+cp ai/example.env ai/.env    # fill Snowflake settings and selected provider key/model
 python ai/enrich_reviews.py
 streamlit run ai/rag_chat.py      # chat with reviews
 streamlit run ai/text_to_sql.py   # chat with the warehouse
 ```
-"# Agentic_AI" 
+
+The defaults select Gemini chat and Gemini embeddings. Set one API key for each selected service; changing `LLM_PROVIDER` switches enrichment, RAG answers, and text-to-SQL together. Embedding selection remains independent. Optional `*_CHAT_MODEL` and `*_EMBEDDING_MODEL` variables override the model defaults in `ai/providers.py`. The RAG parquet cache records the embedding provider/model and is rebuilt if it does not match the active configuration.

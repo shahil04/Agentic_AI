@@ -1,0 +1,12 @@
+langchain-core>=0.3,<2
+langchain-anthropic>=0.3,<2
+langchain-google-genai>=2,<5
+langchain-groq>=0.2,<1
+langchain-openai>=0.3,<2
+langgraph>=0.2,<2
+numpy>=1.26
+pandas>=2.0
+pyarrow>=14
+python-dotenv>=1.0
+snowflake-connector-python>=3.0
+streamlit>=1.30
